@@ -45,6 +45,13 @@ class RecorderController extends ChangeNotifier {
   /// Values are between 0.0 to 1.0.
   List<double> get waveData => _waveData;
 
+  double _averagePeakAmplitude = 0;
+  int _averagePeakAmplitudeSamples = 0;
+
+  double get averagePeakAmplitude => _averagePeakAmplitude;
+
+  bool get averagePeakAmplitudeExists => (_averagePeakAmplitudeSamples > 0);
+
   RecorderState _recorderState = RecorderState.stopped;
 
   /// Provides current state of the [recorder]
@@ -340,6 +347,9 @@ class RecorderController extends ChangeNotifier {
       _currentDurationController.add(elapsedDuration);
     });
 
+    _averagePeakAmplitude = 0.0;
+    _averagePeakAmplitudeSamples = 0;
+
     _timer = Timer.periodic(
       updateFrequency,
       (timer) async {
@@ -353,6 +363,14 @@ class RecorderController extends ChangeNotifier {
         } else {
           _normalise(db);
         }
+
+        double amplitudeSample = db.abs() / (Platform.isIOS ? 1.0 : 32786.0); 
+
+        // (n * a)/(n+1) + v/(n+1) where n is number of samples, a is average and v is new value
+        _averagePeakAmplitude = (_averagePeakAmplitudeSamples.toDouble() * _averagePeakAmplitude) / (_averagePeakAmplitudeSamples + 1).toDouble()
+          + amplitudeSample / (_averagePeakAmplitudeSamples + 1).toDouble();
+        _averagePeakAmplitudeSamples += 1;
+
         notifyListeners();
       },
     );
@@ -388,6 +406,7 @@ class RecorderController extends ChangeNotifier {
     );
 
     final scaledWave = (absDb - _currentMin) / (_maxPeak - _currentMin);
+
     _waveData.add(scaledWave);
     notifyListeners();
   }
