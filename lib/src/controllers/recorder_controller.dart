@@ -1,15 +1,18 @@
 import 'dart:async';
 import 'dart:io' show Platform;
-import 'dart:math' show max;
+import 'dart:math' show log, max, min;
 
 import 'package:flutter/material.dart';
 
 import '/src/base/utils.dart';
 import 'player_controller.dart';
 
+const DB_MIN = 50.0;
+
 // ignore_for_file: deprecated_member_use_from_same_package
 class RecorderController extends ChangeNotifier {
   final List<double> _waveData = [];
+  final List<double> _dbWaveData = []; // scaled data between 0 and -160
 
   /// At which rate waveform needs to be updated
   Duration updateFrequency = const Duration(milliseconds: 100);
@@ -44,13 +47,6 @@ class RecorderController extends ChangeNotifier {
   ///
   /// Values are between 0.0 to 1.0.
   List<double> get waveData => _waveData;
-
-  double _averagePeakAmplitude = 0;
-  int _averagePeakAmplitudeSamples = 0;
-
-  double get averagePeakAmplitude => _averagePeakAmplitude;
-
-  bool get averagePeakAmplitudeExists => (_averagePeakAmplitudeSamples > 0);
 
   RecorderState _recorderState = RecorderState.stopped;
 
@@ -211,6 +207,7 @@ class RecorderController extends ChangeNotifier {
           );
           if (_isRecording) {
             _setRecorderState(RecorderState.recording);
+            _dbWaveData.clear();
             _startTimer();
           } else {
             throw "Failed to start recording";
@@ -334,8 +331,8 @@ class RecorderController extends ChangeNotifier {
     });
   }
 
-  /// Gets decibels from native
-  Future<double?> _getDecibel() async =>
+  /// Gets amplitude from native
+  Future<double?> _getAmplitude() async =>
       await AudioWaveformsInterface.instance.getDecibel();
 
   /// Gets decibel by every defined frequency
@@ -347,29 +344,28 @@ class RecorderController extends ChangeNotifier {
       _currentDurationController.add(elapsedDuration);
     });
 
-    _averagePeakAmplitude = 0.0;
-    _averagePeakAmplitudeSamples = 0;
-
     _timer = Timer.periodic(
       updateFrequency,
       (timer) async {
-        var db = await _getDecibel();
-        if (db == null) {
+        var amplitude = await _getAmplitude();
+        if (amplitude == null) {
           _recorderState = RecorderState.stopped;
           throw "Failed to get sound level";
         }
         if (_useLegacyNormalization) {
-          _normaliseLegacy(db);
+          _normaliseLegacy(amplitude);
         } else {
-          _normalise(db);
+          _normalise(amplitude);
         }
 
-        double amplitudeSample = db.abs() / (Platform.isIOS ? 1.0 : 32786.0); 
+        double amplitudeSample =
+            amplitude.abs() / (Platform.isIOS ? 1.0 : 32786.0);
 
-        // (n * a)/(n+1) + v/(n+1) where n is number of samples, a is average and v is new value
-        _averagePeakAmplitude = (_averagePeakAmplitudeSamples.toDouble() * _averagePeakAmplitude) / (_averagePeakAmplitudeSamples + 1).toDouble()
-          + amplitudeSample / (_averagePeakAmplitudeSamples + 1).toDouble();
-        _averagePeakAmplitudeSamples += 1;
+        _dbWaveData.add(max(
+            20.0 *
+                log(amplitudeSample) /
+                log(10), // log10 doesn't exist so we need to calculate it with the natural logarithm
+            -DB_MIN));
 
         notifyListeners();
       },
@@ -454,5 +450,35 @@ class RecorderController extends ChangeNotifier {
     _recorderTimer = null;
     _isDisposed = true;
     super.dispose();
+  }
+
+  /// Returns the index of the bin with the most db values.
+  /// That means the return value is between 0 and binCount-1 where 0 is the loudest bin
+  int getDbWaveMode(int binCount) {
+    if (binCount < 1) {
+      throw ArgumentError.value(binCount, 'binCount', 'must be greater than 0');
+    }
+    if (_dbWaveData.isEmpty) {
+      return 0;
+    }
+
+    double binSize = DB_MIN / binCount.toDouble();
+    List<int> bins = List.filled(binCount,
+        0); // bin [0] is the loudest and bin [binCount-1] is the queitest
+
+    for (double db in _dbWaveData) {
+      int bin = min((db.abs() / binSize).floor(), binCount - 1);
+      bins[bin] += 1;
+    }
+
+    int maxBin = 0;
+
+    for (int i = 1; i < binCount; i++) {
+      if (bins[i] > bins[maxBin]) {
+        maxBin = i;
+      }
+    }
+
+    return maxBin;
   }
 }
